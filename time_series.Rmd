@@ -1,0 +1,189 @@
+---
+geometry: "left=1.27cm,right=1.27cm,top=1cm,bottom=1cm"
+output: 
+  pdf_document: 
+    highlight: haddock
+    latex_engine: xelatex
+title: 'Series de Tiempo: Materiales PLEX'
+author: 'William Chavarría'
+mainfont: Proxima Nova Regular.otf
+mainfontoptions: 
+- BoldFont=Proxima Nova Bold.otf
+- ItalicFont=Proxima Nova Regular Italic.otf
+- BoldItalicFont=Proxima Nova Bold Italic.otf
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = TRUE,
+                      fig.align = 'center',
+                      message = FALSE,
+                      warning = FALSE, 
+                      comment = '#',
+                      strip.white = TRUE,
+                      highlight = TRUE)
+```
+
+
+```{r cargar_paquetes, include=FALSE}
+ # paquetes necesarios
+  paquetes <- c('tidyquant', 'tidyverse', 'magrittr','data.table','broom','purrr',
+                'cranlogs','stringr','sweep','forecast','geofacet', 'timetk',
+                'kableExtra', 'knitr')
+
+# cargar librerías
+sapply(paquetes, require, character.only = TRUE, quiet = TRUE)
+```
+
+# Descripción de los datos
+
+El set de datos contiene 3,659 observaciones históricas de consumo de cuatro tipos de materiales utilizados en las reparaciones de fallas de planta externa. Los datos no fueron recolectados en una frecuencia regular, por lo que será necesario sumarizarlos en meses.  La muestra comprende de Enero-2015 hasta Agosto-2017.
+
+
+## Cargar datos
+
+```{r leer_dataset}
+osp <- fread(input = 'osp_materials.csv', data.table = FALSE)
+```
+
+## Preparación de los Datos
+
+Procederemos a sumarizar los datos de forma mensual, debido a que es intervalo de tiempo que nos es de mayor utilidad.
+
+### Agregación Mensual
+
+```{r agregacion}
+ # agregacion mensual
+  osp.mensual <- osp %>%
+    mutate_at('fecha', dmy) %>%
+    group_by(material) %>%
+    tq_transmute(
+      select     = cantidad,
+      mutate_fun = apply.monthly,
+      FUN        = sum,
+      na.rm      = TRUE,
+      col_rename = 'total'
+      
+    ) %>% select(fecha, material, total)
+```
+
+### Visualización Mensual
+
+```{r visualizacion_mensual}
+# visualizar el uso de materiales de forma mensual
+  osp.mensual %>%
+    ggplot(aes(x = fecha, y = total, color = material)) +
+    # Data
+    geom_point() +
+    geom_smooth(method = 'loess') +
+    facet_wrap(~ material, ncol = 2, scale = "free_y") +
+    # Aesthetics
+    labs(title = "Consumo de materiales por mes", x = "",
+         subtitle = "Enero-2015 a Agosto-2017", y = 'Consumo Mensual',
+         caption = "Departamento de Tx Support") +
+    expand_limits(y = 0) +
+    scale_color_tq() +
+    theme_tq() +
+    theme(legend.position = "none")
+```
+
+# Cálculos del pronóstico
+
+Utilizamos la función `auto.arima` a la serie de tiempo **tidy**.  Posteriormente, aplicamos la función `forecast` con un horizonte de 12 meses.  Finalmente aplicamos la función `sw_sweep` para presentar la data en una estructura organizada.
+
+```{r forecast}
+ # ajuste y pronostico
+  osp.mensual %<>% 
+    nest() %>%                             
+    mutate(
+      data_ts = map(.x     = data, 
+                    .f     = tk_ts, 
+                    freq   = 12,
+                    start  = 2015,
+                    silent = TRUE)
+      ) %>%
+    mutate(fit = map(.x = data_ts,
+                     .f = auto.arima)
+           ) %>%
+    mutate(pronostico = map(.x = fit,
+                            .f = forecast,
+                            h = 12))
+  
+  # aplicar sweep
+  osp.sweep <- osp.mensual %>%
+    mutate(sweep = map(.x           = pronostico,
+                       .f           = sw_sweep,
+                       timetk_idx   = TRUE,
+                       rename_index = 'date')
+           ) %>%
+    select(material, sweep) %>%
+    unnest()
+```
+
+# Graficar Pronósticos
+
+```{r graficar_pronosticos}
+osp.sweep %>%
+    ggplot(aes(x = date, y = total, color = key)) +
+    geom_ribbon(aes(ymin = lo.95, ymax = hi.95), 
+                fill = "#D5DBFF", color = NA, size = 0) +
+    geom_ribbon(aes(ymin = lo.80, ymax = hi.80, fill = key), 
+                fill = "#596DD5", color = NA, size = 0, alpha = 0.8) +
+    geom_point() +
+    geom_line(size = 0.8) +
+    facet_wrap(~ material, ncol = 2, scale = "free") +
+    theme_tq() +
+    scale_color_tq(theme = 'dark') +
+    ggtitle("Outside Plant (OSP) Materials, 12-Months Forecast") +
+    xlab("") +
+    ylab("Cantidad")
+```
+
+# Tabla de Pronósticos
+
+Procederemos a revisar únicamente las primeras tres observaciones pronósticadas para los materiales BANDEJAS, CRUCETAS y MUFAS.  Para el caso de la fibra óptica, que es el material de mayor interés, presentamos un horizonte mayor.
+
+### BANDEJAS
+\vspace{3pt}
+
+```{r bandejas}
+osp.sweep %>% filter(!is.na(lo.80), material == 'BANDEJAS') %>% slice(1:3) %>% select(-key)
+```
+
+###  CRUCETAS
+\vspace{3pt}
+
+```{r crucetas}
+osp.sweep %>% filter(!is.na(lo.80), material == 'CRUCETAS') %>% slice(1:3) %>% select(-key)
+```
+
+### MUFAS
+\vspace{3pt}
+
+```{r mufas_pup}
+osp.sweep %>% filter(!is.na(lo.80), material == 'MUFAS PUP') %>% slice(1:3) %>% select(-key)
+```
+
+### FIBRA
+\vspace{3pt}
+
+```{r fibra_optica}
+fibra <- osp.sweep %>% filter(key == 'forecast', material == 'FIBRA') %>% slice(1:10) %>% select(-key)
+kable(fibra, format = 'latex', align = 'c', digits = 2) %>%
+  kable_styling(position = 'center') %>%
+    column_spec(1, bold = T, color = 'red')
+```
+
+# Precisión del Modelo
+\vspace{3pt}
+```{r precision}
+p <- osp.mensual %>% mutate(glance = map(.x = fit, .f = sw_glance)) %>% unnest(glance, .drop = TRUE)
+
+ kable(p, format = 'latex', digits = 2, booktabs = T) %>%
+   kable_styling(latex_options = c("striped", "scale_down")) %>%
+   row_spec(0, bold = T)
+     
+
+
+```
+
